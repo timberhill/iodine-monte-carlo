@@ -1,8 +1,8 @@
 import numpy as np
 import os
-from .utilities import getParabolaVertex, normalize_bfp
+from multiprocessing import Pool
 
-# from multiprocessing import Pool
+from .utilities import getParabolaVertex, normalize_bfp
 
 
 def find_peak(x, y, xmin, xmax, fit=None):
@@ -44,8 +44,8 @@ def measure_peaks(periods, logbf, peaks=[], fit_peak="parabola", ignore_errors=T
     highest_period, highest_logbf = find_peak(
         x    = periods, 
         y    = logbf,
-        xmin = periods[highest_i] / 1.2,
-        xmax = periods[highest_i] * 1.2,
+        xmin = periods[highest_i] / 1.1,
+        xmax = periods[highest_i] * 1.1,
         fit  = fit_peak
     )
     measurements.append((highest_period, highest_logbf))
@@ -69,11 +69,17 @@ def measure_peaks(periods, logbf, peaks=[], fit_peak="parabola", ignore_errors=T
     return measurements
 
 
-def measure_bfps(folder, saveto=None, prefix="", indices=np.arange(0, 25000), nobs=None, peaks1=[], peaks2=[]):
+def measure_bfp(path, peaks, nobs, fit_peak="parabola"):
+    bfp    = np.genfromtxt(path, skip_header=1, delimiter=",").T
+    bfp[1] = normalize_bfp(periods=bfp[0], logbf=bfp[1], n=nobs)
+    return measure_peaks(bfp[0], bfp[1], peaks, fit_peak)
+
+
+def measure_bfps(folder, saveto=None, prefix="", indices=np.arange(0, 25000), nobs=None, peaks1=[], peaks2=[], ncores=1):
     """
     Measure all   monte carlo bfps in a folder.
 
-    folder, str:  folder containing "rv/" and "bfp/" sunfolder containing the monte carlo result files.
+    folder, str:  folder containing "rv/" and "bfp/" subfolders containing the monte carlo output files.
 
     saveto, str:  path to the output csv file.
 
@@ -88,31 +94,71 @@ def measure_bfps(folder, saveto=None, prefix="", indices=np.arange(0, 25000), no
     peaks2, list: peaks to measure from *-bfp2.txt files (BFPs of the BFP 1 residuals, see measure_peaks()).
     """
     if saveto is None:
-        saveto = f"{prefix}measurements.txt"
+        saveto = f"{prefix}-measurements.txt"
 
     # construct a header
     header1 = "\t".join([f"bfp1_P{int(x[0])}_period\tbfp1_P{int(x[0])}_logbf" for x in peaks1])
-    header2 = "\t".join([f"bfp2_P{int(x[0])}_period\tbfp2_P{int(x[0])}_logbf" for x in peaks1])
-    header = f"bfp1_highest_period\t{header1}\tbfp2_highest_period\t{header2}\n"
+    header2 = "\t".join([f"bfp2_P{int(x[0])}_period\tbfp2_P{int(x[0])}_logbf" for x in peaks2])
+    header = f"index\tbfp1_highest_period\tbfp1_highest_logbf\t{header1}\tbfp2_highest_period\tbfp2_highest_logbf\t{header2}\n"
 
     with open(saveto, "w+") as csv:
         csv.write(header)
 
+    if ncores > 1:
+        Pool(ncores).starmap(
+            measure_and_write_bfp,
+            [(saveto, nobs, folder, prefix, index, peaks1, peaks2) for index in indices]
+        )
+    else:
         for index in indices:
-            line = ""
-            if nobs is None:
-                nobs = len(np.genfromtxt(os.path.join(folder, os.path.join(folder, "rv", f"{prefix}{index}.txt")), skip_header=1, delimiter="\t").T[0])
+            measure_and_write_bfp(saveto, nobs, folder, prefix, index, peaks1, peaks2)
+    
+    print("Done.                       ")
 
-            bfp1    = np.genfromtxt(os.path.join(folder, f"{prefix}-bfp1.txt"), skip_header=1, delimiter=",").T
-            bfp1[1] = normalize_bfp(logbf=bfp1[1], n=nobs)
-            measured_peaks1 = measure_peaks(bfp1[0], bfp1[1], peaks1)
-            line += "\t".join([f"{x[0]}\t{x[1]}" for x in measured_peaks1])
-            line += "\t"
 
-            bfp2    = np.genfromtxt(os.path.join(folder, f"{prefix}-bfp2.txt"), skip_header=1, delimiter=",").T
-            bfp2[1] = normalize_bfp(logbf=bfp2[1], n=nobs)
-            measured_peaks2 = measure_peaks(bfp2[0], bfp2[1], peaks2)
-            line += "\t".join([f"{x[0]}\t{x[1]}" for x in measured_peaks1])
-            line += "\n"
+def measure_and_write_bfp(saveto, nobs, folder, prefix, index, peaks1, peaks2):
+    print(f"Processing index #{index}   ", end='\r')
 
-            csv.write(line)
+    if nobs is None:
+        nobs = len(np.genfromtxt(os.path.join(folder, "rv", f"{prefix}-{index}.txt"), skip_header=1, delimiter="\t").T[0])
+
+    line = f"{index}\t"
+
+    measured_peaks1 = measure_bfp(
+        path  = os.path.join(folder, "bfp", f"{prefix}-{index}-bfp1.txt"),
+        peaks = peaks1,
+        nobs  = nobs
+    )
+    line += "\t".join([f"{x[0]}\t{x[1]}" for x in measured_peaks1])
+    line += "\t"
+
+    measured_peaks2 = measure_bfp(
+        path  = os.path.join(folder, "bfp", f"{prefix}-{index}-bfp2.txt"),
+        peaks = peaks2,
+        nobs  = nobs
+    )
+    line += "\t".join([f"{x[0]}\t{x[1]}" for x in measured_peaks2])
+    line += "\n"
+
+    if measured_peaks2[1][1] < 2:
+        print(measured_peaks2[1][1])
+        import matplotlib.pyplot as plt
+        f, ax = plt.subplots(2, 1)
+
+        path   = os.path.join(folder, "bfp", f"{prefix}-{index}-bfp1.txt")
+        bfp    = np.genfromtxt(path, skip_header=1, delimiter=",").T
+        bfp[1] = normalize_bfp(periods=bfp[0], logbf=bfp[1], n=nobs)
+        ax[0].plot(bfp[0], bfp[1], "k-")
+
+        path   = os.path.join(folder, "bfp", f"{prefix}-{index}-bfp2.txt")
+        bfp    = np.genfromtxt(path, skip_header=1, delimiter=",").T
+        bfp[1] = normalize_bfp(periods=bfp[0], logbf=bfp[1], n=nobs)
+        ax[1].plot(bfp[0], bfp[1], "k-")
+
+        ax[0].set_xscale("log")
+        ax[1].set_xscale("log")
+
+        plt.show()
+
+    with open(saveto, "a") as csv:
+        csv.write(line)

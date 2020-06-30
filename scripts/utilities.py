@@ -47,6 +47,6 @@ def normalize_bfp(periods, logbf, n, period_range=[1, 1e100]):
         logbf, list: corrected log BF values.
     """
     mask = (periods >= period_range[0]) & (periods <= period_range[1])
-    offset = - np.min(logbf[mask]) - np.log(n)
+    offset = np.min(logbf[mask]) + np.log(n)
 
-    return logbf + offset
+    return logbf - offset
